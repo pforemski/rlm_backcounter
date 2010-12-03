@@ -1,0 +1,14 @@
+#
+# rlm_backcounter Makefile.in
+#
+
+TARGET      = @targetname@
+SRCS        = rlm_backcounter.c
+HEADERS     =
+RLM_CFLAGS  = @backcounter_cflags@
+RLM_LIBS    = @backcounter_ldflags@
+RLM_INSTALL =
+
+include ../rules.mak
+
+$(LT_OBJS): $(HEADERS)

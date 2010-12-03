@@ -47,6 +47,14 @@
 #define RLM_BC_MAX_ROWS 1000000
 #define RLM_BC_TMP_PREFIX "auth-tmp-"
 
+struct bcnt_level {
+	uint32_t   from;            /* UNIX timestamp reference point */
+	uint32_t   each;            /* number of seconds between repetitions */
+	uint32_t   length;          /* number of seconds of how long level lasts */
+	double     factor;          /* factor for count_names (see config file) */
+	struct bcnt_level *next;    /* next on list */
+};
+
 typedef struct rlm_backcounter_t {
 	const char *myname;         /* name of this instance */
 	SQL_INST *sqlinst;          /* SQL_INST for requested instance */
@@ -71,6 +79,10 @@ typedef struct rlm_backcounter_t {
 	char *limitvap;             /* the amount to add to db_left on counter reset */
 	char *resetvap;             /* next counter reset time */
 	char *prepaidvap;           /* the prepaid counter (we can only decrease it) */
+
+	/* time-dependent levels */
+	char *levels_str;           /* string representation of levels */
+	struct bcnt_level *levels;  /* parsed levels_str */
 } rlm_backcounter_t;
 
 /* char *name, int type,
@@ -79,13 +91,11 @@ static CONF_PARSER module_config[] = {
 	{ "sqlinst_name", PW_TYPE_STRING_PTR,
 	  offsetof(rlm_backcounter_t, sqlinst_name), NULL, "sql" },
 	{ "period",       PW_TYPE_INTEGER,
-	  offsetof(rlm_backcounter_t, period),       NULL,
-	  "2592000" },  /* default: 30 days */
+	  offsetof(rlm_backcounter_t, period),       NULL, "2592000" },  /* default: 30 days */
 	{ "prepaidfirst", PW_TYPE_BOOLEAN,
 	  offsetof(rlm_backcounter_t, prepaidfirst), NULL, "yes" },
 	{ "count_names",  PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, count_names),  NULL,
-	  "Acct-Input-Octets, Acct-Output-Octets" },
+	  offsetof(rlm_backcounter_t, count_names),  NULL, "Acct-Input-Octets, Acct-Output-Octets" },
 	{ "overvap",      PW_TYPE_STRING_PTR,
 	  offsetof(rlm_backcounter_t, overvap),      NULL, "Counter-Exceeded" },
 	{ "guardvap",     PW_TYPE_STRING_PTR,
@@ -98,6 +108,8 @@ static CONF_PARSER module_config[] = {
 	  offsetof(rlm_backcounter_t, resetvap),     NULL, "Counter-Reset" },
 	{ "prepaidvap",   PW_TYPE_STRING_PTR,
 	  offsetof(rlm_backcounter_t, prepaidvap),   NULL, "Counter-Prepaid" },
+	{ "levels",       PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, levels_str),   NULL, "" },
 	{ NULL, -1, 0, NULL, NULL } /* end */
 };
 
@@ -209,6 +221,7 @@ static int bcnt_select_finish(rlm_backcounter_t *data, SQLSOCK *sqlsock)
 static int backcounter_detach(void *instance)
 {
 	rlm_backcounter_t *data = (rlm_backcounter_t *) instance;
+	struct bcnt_level *level, *next_level;
 
 	/* (*data) is zeroed on instantiation */
 	if (data->sqlinst_name) free(data->sqlinst_name);
@@ -220,6 +233,15 @@ static int backcounter_detach(void *instance)
 	if (data->prepaidvap)   free(data->prepaidvap);
 	if (data->overvap)      free(data->overvap);
 	if (data->guardvap)     free(data->guardvap);
+
+	/* free levels */
+	level = data->levels;
+	while (level) {
+		next_level = level->next;
+		free(level);
+		level = next_level;
+	}
+
 	free(data);
 
 	return 0;
@@ -231,6 +253,7 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	rlm_backcounter_t *data;
 	module_instance_t *modinst;
 	int i, c, l, a;
+	struct bcnt_level *last = NULL, *level;
 	DICT_ATTR *dattr;
 
 	/* set up a storage area for instance data */
@@ -337,6 +360,57 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	}
 	else {
 		data->guardvap_attr = 0;
+	}
+
+	/*
+	 * levels
+	 */
+	while (data->levels_str && *data->levels_str) {
+		level = rad_malloc(sizeof(*level));
+		if (!level) {
+			backcounter_detach(*instance);
+			return -1;
+		}
+
+		/* macro to skip keyword and go directly to the value */
+#		define NEXT() do {                                         \
+			while (*data->levels_str && !isspace(*data->levels_str)) \
+				data->levels_str++;                                 \
+			while (*data->levels_str && isspace(*data->levels_str))  \
+				data->levels_str++;                                 \
+		} while(0);
+
+		/* skip whitechars at beginning of line */
+		while (*data->levels_str && isspace(*data->levels_str))
+			data->levels_str++;
+
+		NEXT();
+		level->from   = atol(data->levels_str);
+		NEXT();
+		level->each   = atol(data->levels_str);
+		NEXT();
+		level->length = atol(data->levels_str);
+		NEXT();
+		level->factor = strtod(data->levels_str, (char **) NULL);
+
+		bcnt_log(__LINE__, data, L_DBG,
+			"backcounter_instantiate(): loaded level from %d each %d for %d use %g\n",
+			level->from, level->each, level->length, level->factor);
+
+		/* skip after newline */
+		while (*data->levels_str && *data->levels_str != '\n')
+			data->levels_str++;
+
+		if (*data->levels_str == '\n')
+			data->levels_str++;
+
+		/* update list */
+		if (!data->levels)
+			data->levels = level;
+		else if (last)
+			last->next = level;
+
+		last = level;
 	}
 
 	/* save pointers to useful "objects" */
