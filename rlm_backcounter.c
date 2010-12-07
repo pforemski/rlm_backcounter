@@ -113,6 +113,79 @@ static CONF_PARSER module_config[] = {
 	{ NULL, -1, 0, NULL, NULL } /* end */
 };
 
+struct lp_data {
+	enum lp_keyword {
+		LK_FROM,
+		LK_EACH,
+		LK_FOR,
+		LK_USE,
+		LK_END
+	} keyword;
+	int32_t value_int;
+	double  value_double;
+	char    *next;
+};
+
+/** Parse part of the levels option
+ * @retval 0   parse error
+ * @retval 1   success */
+static int bcnt_levels_parser(char *ptr, struct lp_data *lp)
+{
+	char *keyw, *val;
+
+	if (!ptr) {
+		lp->keyword = LK_END;
+		lp->next = NULL;
+		return 1;
+	}
+
+	/* search for keyword */
+	while (*ptr == ' ')
+		ptr++;
+
+	if (!*ptr)
+		return 0;
+	else if (*ptr == ',') {
+		lp->keyword = LK_END;
+		lp->next = ptr + 1;
+		return 1;
+	}
+
+	/* read keyword */
+	keyw = ptr;
+	while (isalpha(*ptr))
+		ptr++;
+
+	if (*ptr != ' ')
+		return 0;
+
+	if (strncmp(keyw, "from", 4) == 0)
+		lp->keyword = LK_FROM;
+	else if (strncmp(keyw, "each", 4) == 0)
+		lp->keyword = LK_EACH;
+	else if (strncmp(keyw, "for", 3) == 0)
+		lp->keyword = LK_FOR;
+	else if (strncmp(keyw, "use", 3) == 0)
+		lp->keyword = LK_USE;
+	else
+		return 0;
+
+	/* read value */
+	val = ++ptr;
+	while (isdigit(*ptr) || *ptr == '.')
+		ptr++;
+
+	lp->value_int = atol(val);
+	lp->value_double = strtod(val, (char **) NULL);
+
+	if (*ptr)
+		lp->next = ptr;
+	else
+		lp->next = NULL;
+
+	return 1;
+}
+
 /** Wrapper around radlog which adds prefix with module and instance name */
 static int bcnt_log(unsigned int line, rlm_backcounter_t *data, int lvl,
                     const char *fmt, ...)
@@ -220,8 +293,13 @@ static int bcnt_select_finish(rlm_backcounter_t *data, SQLSOCK *sqlsock)
 /** Cleanup stuff */
 static int backcounter_detach(void *instance)
 {
-	rlm_backcounter_t *data = (rlm_backcounter_t *) instance;
+	rlm_backcounter_t *data;
 	struct bcnt_level *level, *next_level;
+
+	if (instance == NULL)
+		return 0;
+
+	data = (rlm_backcounter_t *) instance;
 
 	/* (*data) is zeroed on instantiation */
 	if (data->sqlinst_name) free(data->sqlinst_name);
@@ -255,6 +333,7 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	int i, c, l, a;
 	struct bcnt_level *last = NULL, *level;
 	DICT_ATTR *dattr;
+	struct lp_data lp;
 
 	/* set up a storage area for instance data */
 	data = rad_malloc(sizeof(*data));
@@ -365,52 +444,45 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	/*
 	 * levels
 	 */
-	while (data->levels_str && *data->levels_str) {
-		level = rad_malloc(sizeof(*level));
-		if (!level) {
-			backcounter_detach(*instance);
-			return -1;
+	if (data->levels_str && *data->levels_str) {
+		lp.next = data->levels_str;
+
+		while (lp.next) {
+			level = rad_malloc(sizeof(*level));
+			if (!level) {
+				backcounter_detach(*instance);
+				return -1;
+			}
+
+			do {
+				if (!bcnt_levels_parser(lp.next, &lp)) {
+					bcnt_log(__LINE__, data, L_ERR,
+						"backcounter_instantiate(): parse error in 'levels' option");
+					backcounter_detach(*instance);
+					return -1;
+				}
+
+				switch (lp.keyword) {
+					case LK_FROM: level->from   = lp.value_int; break;
+					case LK_EACH: level->each   = lp.value_int; break;
+					case LK_FOR:  level->length = lp.value_int; break;
+					case LK_USE:  level->factor = lp.value_double; break;
+					case LK_END:  break;
+				}
+			} while (lp.keyword != LK_END);
+
+			bcnt_log(__LINE__, data, L_DBG,
+				"backcounter_instantiate(): loaded level from %d each %d for %d use %g\n",
+				level->from, level->each, level->length, level->factor);
+
+			/* update list */
+			if (!data->levels)
+				data->levels = level;
+			else if (last)
+				last->next = level;
+
+			last = level;
 		}
-
-		/* macro to skip keyword and go directly to the value */
-#		define NEXT() do {                                         \
-			while (*data->levels_str && !isspace(*data->levels_str)) \
-				data->levels_str++;                                 \
-			while (*data->levels_str && isspace(*data->levels_str))  \
-				data->levels_str++;                                 \
-		} while(0);
-
-		/* skip whitechars at beginning of line */
-		while (*data->levels_str && isspace(*data->levels_str))
-			data->levels_str++;
-
-		NEXT();
-		level->from   = atol(data->levels_str);
-		NEXT();
-		level->each   = atol(data->levels_str);
-		NEXT();
-		level->length = atol(data->levels_str);
-		NEXT();
-		level->factor = strtod(data->levels_str, (char **) NULL);
-
-		bcnt_log(__LINE__, data, L_DBG,
-			"backcounter_instantiate(): loaded level from %d each %d for %d use %g\n",
-			level->from, level->each, level->length, level->factor);
-
-		/* skip after newline */
-		while (*data->levels_str && *data->levels_str != '\n')
-			data->levels_str++;
-
-		if (*data->levels_str == '\n')
-			data->levels_str++;
-
-		/* update list */
-		if (!data->levels)
-			data->levels = level;
-		else if (last)
-			last->next = level;
-
-		last = level;
 	}
 
 	/* save pointers to useful "objects" */
