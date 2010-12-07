@@ -1,0 +1,153 @@
+About
+=====
+
+rlm_backcounter manages various counters which count back and are periodically
+resetted to some value. These counters can be defined eg. for whole user group,
+but with values and reset intervals specific for each individual user.
+
+There is also additional "prepaid" counter, which can be set to any value from
+outside of rlm_backcounter - the module only decreases it.
+
+This module can be used to e.g.
+
+  * limit monthly bandwidth usage, with uniform distribution of counter resets
+    during month (ie. to overcome excessive network usage when all users have
+    their counters resetted on the same day),
+  * implement prepaid accounts,
+  * put your clients' network traffic into various QoS/SLA classes depending on
+    their network usage.
+
+How it works
+============
+
+Authorization
+-------------
+
+_Note_: Why to do anything related to counters in this section? Because it's far
+more easier in FreeRADIUS to react as soon as possible, and to do user updates,
+etc. basing on attributes in request packets (instead of reply packets).
+
+* if the counter of the user we're handling request for should be resetted:
+    * set the counter to the value defined in user's reply attributes
+      (fetched from database), or if these don't exist, in group's reply
+      attributes
+    * set reset time to current value + period defined in module
+      instance-wide configuration, making sure it's greater than current
+      time moment
+* fetch current counter values and check if their sum is greater than
+  zero:
+    * if user is under limit, set session "guard VAP" to the counter
+      value (if configured to do so)
+    * otherwise, add a new VAP to the request packet or simply send back
+      an access rejection
+
+Accounting
+----------
+
+Only _Accounting-Stop_ packets are considered.
+
+* decrease counters in configurable manner:
+     * use sum of values in VAPs given in configuration as the decrement
+     * let the administrator choose whether to decrement the prepaid or the
+       "monthly" counter first
+
+Configuration
+=============
+
+An example on how to create a monthly transfer limit.
+
+In radiusd.conf, create module configuration:
+
+    modules {
+        # (...)
+
+        backcounter transfer-limit {
+            # name of rlm_sql module instance to connect to
+            sqlinst_name = "sql"
+
+            # what to count in accounting packets
+            count_names = "Acct-Input-Octets, Acct-Output-Octets"
+
+            # VAP in which to send the amount which is left
+            guardvap = "Session-Octets-Limit"
+
+            # reset counters each 30 days
+            period = 2592000
+
+            # monthly transfer limit, in bytes
+            limitvap = "Monthly-Transfer-Limit"
+
+            # time of next reset for this particular user
+            resetvap = "Monthly-Transfer-Reset"
+
+            # VAP to set in *request* to 1 if the user has reached his limits
+            overvap = "Monthly-Transfer-Exceeded"
+
+            # transfer left - monthly, prepaid
+            leftvap = "Monthly-Transfer-Left"
+            prepaidvap = "Monthly-Transfer-Prepaid"
+
+            # which counter to decrease first
+            prepaidfirst = yes
+        }
+    }
+
+Then, instantiate it after rlm_sql:
+
+    instantiate {
+        # (...)
+        sql
+        transfer-limit
+        # (...)
+    }
+
+Put it in the authorize section:
+
+    authorize {
+        # (...)
+        sql
+        transfer-limit
+        # some module to restrict bandwidth if overvap is set, eg.:
+        # users
+        # (...)
+    }
+
+And anywhere in the accounting section:
+
+    accounting {
+        # (...)
+        transfer-limit
+    }
+
+Add new attributes in the dictionary file:
+
+    # (...)
+
+    # string, because integer's 2^32 may not be sufficient
+    ATTRIBUTE Monthly-Transfer-Limit    3100 string
+    ATTRIBUTE Monthly-Transfer-Reset    3101 integer
+    ATTRIBUTE Monthly-Transfer-Exceeded 3102 integer
+    ATTRIBUTE Monthly-Transfer-Left     3103 string
+    ATTRIBUTE Monthly-Transfer-Prepaid  3104 string
+
+    # strange, but it's not in official FreeRADIUS dictionary
+    ATTRIBUTE Session-Octets-Limit       227 integer
+
+If you wish to limit bandwidth usage on eg. a Lintrack router, add this to your
+users file (some modifications depending on local configuration may be
+required):
+
+    DEFAULT Monthly-Transfer-Exceeded == 1
+        Reply-Message = "You have reached your monthly bandwidth limit",
+        ASN-Kbps-Down := 64,
+        ASN-Kbps-Up := 64
+
+Current limitations (maybe a TODO list)
+=======================================
+
+* probably works only with MySQL
+* a bit too "hardcoded"
+    * queries and tables names not configurable
+    * low-level access to database 
+* handles only at most 32-bit counters for single sessions (but using counters
+  of "any" size in database is possible)
