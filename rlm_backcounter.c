@@ -43,7 +43,8 @@
 
 #include "../rlm_sql/rlm_sql.h"
 
-#define RLM_BC_LOG_FMT "rlm_backcounter(%s, line %u): %s"
+#define RLM_BC_VERSION "0.2"
+
 #define RLM_BC_MAX_ROWS 1000000
 #define RLM_BC_TMP_PREFIX "auth-tmp-"
 
@@ -186,17 +187,61 @@ static int bcnt_levels_parser(char *ptr, struct lp_data *lp)
 	return 1;
 }
 
+/** Find current level
+ * @param root             first level
+ * @param curtime          current UNIX time
+ * @param time_left        time left for to next level change
+ * @param retval NULL      no special level active
+ */
+static struct bcnt_level *bcnt_find_level(struct bcnt_level *root, uint32_t curtime, uint32_t *time_left)
+{
+	struct bcnt_level *level;
+	uint32_t session_timeout;
+	uint32_t time_in_level;
+
+	session_timeout = UINT32_MAX;
+
+	for (level = root; level; level = level->next) {
+		/* level not yet active */
+		if (level->from > curtime) {
+			if (level->from - curtime < session_timeout)
+				session_timeout = level->from - curtime;
+
+			continue;
+		}
+
+		/* find our "time position" in level definition */
+		time_in_level = (curtime - level->from) % level->each;
+
+		/* outside of level? */
+		if (time_in_level >= level->length) {
+			if (level->each - time_in_level < session_timeout)
+				session_timeout = level->each - time_in_level;
+
+			continue;
+		}
+
+		/* set session timeout so it finishes on level end */
+		session_timeout = level->length - time_in_level;
+		break;
+	}
+
+	if (time_left)
+		*time_left = session_timeout;
+
+	return level;
+}
+
 /** Wrapper around radlog which adds prefix with module and instance name */
-static int bcnt_log(unsigned int line, rlm_backcounter_t *data, int lvl,
-                    const char *fmt, ...)
+static int bcnt_log_detailed(int lvl, const char *file, unsigned int line, const char *fnname,
+	rlm_backcounter_t *data, const char *fmt, ...)
 {
 	va_list ap;
 	int r;
-	char pfmt[4096];
+	char pfmt[BUFSIZ];
 
-	/* prefix log message with RLM_BC_LOG_FMT */
-	snprintf(pfmt, sizeof(pfmt), RLM_BC_LOG_FMT,
-	         data->myname, line, fmt);
+	snprintf(pfmt, sizeof(pfmt), "rlm_backcounter/%s: (%s#%u) %s(): %s",
+		data->myname, file, line, fnname, fmt);
 
 	va_start(ap, fmt);
 	r = vradlog(lvl, pfmt, ap);
@@ -204,6 +249,7 @@ static int bcnt_log(unsigned int line, rlm_backcounter_t *data, int lvl,
 
 	return r;
 }
+#define bcnt_log(lvl, ...) bcnt_log_detailed((lvl), __FILE__, __LINE__, __func__, data, __VA_ARGS__)
 
 /** Handy SQL query tool */
 static int bcnt_vquery(unsigned int line, rlm_backcounter_t *data,
@@ -214,8 +260,8 @@ static int bcnt_vquery(unsigned int line, rlm_backcounter_t *data,
 	vsnprintf(query, MAX_QUERY_LEN, fmt, ap);
 
 	if (rlm_sql_query(sqlsock, data->sqlinst, query)) {
-		bcnt_log(__LINE__, data, L_ERR, "bcnt_vquery(): query from line %u: %s",
-		         line, (char *)(data->db->sql_error)(sqlsock, data->sqlinst->config));
+		bcnt_log(L_ERR, "query from line %u: %s",
+		         line, (const char *)(data->db->sql_error)(sqlsock, data->sqlinst->config));
 		return 0;
 	}
 
@@ -261,22 +307,17 @@ static int bcnt_select(unsigned int line, rlm_backcounter_t *data,
 	va_end(ap);
 
 	if ((data->db->sql_store_result)(sqlsock, data->sqlinst->config)) {
-		bcnt_log(__LINE__, data, L_ERR,
-		         "bcnt_select(): error while saving results of query from line %u",
-		         line);
+		bcnt_log(L_ERR, "error while saving results of query from line %u", line);
 		return 0;
 	}
 
 	if ((data->db->sql_num_rows)(sqlsock, data->sqlinst->config) < 1) {
-		bcnt_log(__LINE__, data, L_DBG,
-		         "bcnt_select(): no results in query from line %u", line);
+		bcnt_log(L_DBG, "no results in query from line %u", line);
 		return -1;
 	}
 
 	if ((data->db->sql_fetch_row)(sqlsock, data->sqlinst->config)) {
-		bcnt_log(__LINE__, data, L_ERR,
-		         "bcnt_select(): couldn't fetch row from results of query from line %u",
-		        line);
+		bcnt_log(L_ERR, "couldn't fetch row from results of query from line %u", line);
 		return 0;
 	}
 
@@ -353,18 +394,14 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 
 	modinst = find_module_instance(cf_section_find("modules"), (data->sqlinst_name), 1 );
 	if (!modinst) {
-		bcnt_log(__LINE__, data, L_ERR,
-		        "backcounter_instantiate(): cannot find module instance "
-		        "named \"%s\"", data->sqlinst_name);
+		bcnt_log(L_ERR, "cannot find module instance named \"%s\"", data->sqlinst_name);
 		backcounter_detach(*instance);
 		return -1;
 	}
 
 	/* check if the given instance is really a rlm_sql instance */
 	if (strcmp(modinst->entry->name, "rlm_sql") != 0) {
-		bcnt_log(__LINE__, data, L_ERR,
-		        "backcounter_instantiate(): given instance (%s) is not "
-		        "an instance of the rlm_sql module", data->sqlinst_name);
+		bcnt_log(L_ERR, "given instance (%s) is not an instance of the rlm_sql module", data->sqlinst_name);
 		backcounter_detach(*instance);
 		return -1;
 	}
@@ -393,9 +430,7 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	for (i = 0; i < l; ) {
 		dattr = dict_attrbyname(data->count_names + i);
 		if (dattr == NULL) {
-			bcnt_log(__LINE__, data, L_ERR,
-			         "backcounter_instantiate(): can't parse count_names "
-			         "argument name: %s", data->count_names + i);
+			bcnt_log(L_ERR, "can't parse count_names argument name: %s", data->count_names + i);
 			backcounter_detach(*instance);
 			return -1;
 		}
@@ -414,9 +449,7 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	if (data->overvap && data->overvap[0]) {
 		dattr = dict_attrbyname(data->overvap);
 		if (dattr == NULL) {
-			bcnt_log(__LINE__, data, L_ERR,
-			         "backcounter_instantiate(): overvap: can't find such "
-			         "attribute: %s", data->overvap);
+			bcnt_log(L_ERR, "overvap: can't find such attribute: %s", data->overvap);
 			backcounter_detach(*instance);
 			return -1;
 		}
@@ -429,9 +462,7 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	if (data->guardvap && data->guardvap[0]) {
 		dattr = dict_attrbyname(data->guardvap);
 		if (dattr == NULL) {
-			bcnt_log(__LINE__, data, L_ERR,
-			         "backcounter_instantiate(): guardvap: can't find such "
-			         "attribute: %s", data->guardvap);
+			bcnt_log(L_ERR, "guardvap: can't find such attribute: %s", data->guardvap);
 			backcounter_detach(*instance);
 			return -1;
 		}
@@ -456,8 +487,7 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 
 			do {
 				if (!bcnt_levels_parser(lp.next, &lp)) {
-					bcnt_log(__LINE__, data, L_ERR,
-						"backcounter_instantiate(): parse error in 'levels' option");
+					bcnt_log(L_ERR, "parse error in 'levels' option");
 					backcounter_detach(*instance);
 					return -1;
 				}
@@ -471,9 +501,14 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 				}
 			} while (lp.keyword != LK_END);
 
-			bcnt_log(__LINE__, data, L_DBG,
-				"backcounter_instantiate(): loaded level from %d each %d for %d use %g\n",
+			bcnt_log(L_DBG, "loaded level from %d each %d for %d use %g\n",
 				level->from, level->each, level->length, level->factor);
+
+			if (level->each < level->length) {
+				bcnt_log(L_ERR, "level period repetition is smaller than its length");
+				backcounter_detach(*instance);
+				return -1;
+			}
 
 			/* update list */
 			if (!data->levels)
@@ -490,6 +525,8 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	data->db = (rlm_sql_module_t *) data->sqlinst->module;
 
 	*instance = data;
+
+	bcnt_log(L_INFO, "rlm_backcounter " RLM_BC_VERSION " initialized");
 	return 0;
 }
 
@@ -498,25 +535,28 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 {
 	VALUE_PAIR *vp = NULL, *user;
 	SQLSOCK *sqlsock;
-	time_t curtime, rsttime;
 	double counter;
 	double resetval;
+	uint32_t curtime;
+	uint32_t rsttime;
+	struct bcnt_level *level;
+	uint32_t session_timeout;
 
 	rlm_backcounter_t *data = (rlm_backcounter_t *) instance;
+
+	curtime = (uint32_t) time(NULL);
 
 	/* get real username */
 	user = request->username;
 	if (user == NULL) {
-		bcnt_log(__LINE__, data, L_ERR, "backcounter_authorize(): "
-		         "couldn't find real user name");
+		bcnt_log(L_ERR, "couldn't find real user name");
 		return RLM_MODULE_FAIL;
 	}
 
 	/* get our database connection */
 	sqlsock = sql_get_socket(data->sqlinst);
 	if (!sqlsock) {
-		bcnt_log(__LINE__, data, L_ERR,
-		        "backcounter_authorize(): error while requesting an SQL socket");
+		bcnt_log(L_ERR, "error while requesting an SQL socket");
 		return RLM_MODULE_FAIL;
 	}
 
@@ -526,23 +566,20 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 	        "WHERE `UserName` = '%s' AND `Attribute` = '%s' LIMIT 1",
 	        user->vp_strvalue, data->resetvap)) {
 		case -1: /* no results */
-			bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-			         "user '%s' has no '%s' attribute set in radreply table",
+			bcnt_log(L_DBG, "user '%s' has no '%s' attribute set in radreply table",
 			         user->vp_strvalue, data->resetvap);
 			break;
 		case 0: /* db error */
 			sql_release_socket(data->sqlinst, sqlsock);
 			return RLM_MODULE_FAIL;
 		default: /* there *is* reset timer set */
-			rsttime = atoi(sqlsock->row[0]);
-			curtime = time(NULL);
+			rsttime = strtoul(sqlsock->row[0], (char **) NULL, 10);
 			bcnt_select_finish(data, sqlsock);
 
 			/* if it's reset time */
 			if (curtime > rsttime) {
 			 	/* set user's leftvap to the value of limitvap (may be in group reply) */
-				bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-				         "resetting user '%s' counter", user->vp_strvalue);
+				bcnt_log(L_DBG, "resetting user '%s' counter", user->vp_strvalue);
 
 				/* if <= 0, we won't update db */
 				resetval = 0.0;
@@ -561,7 +598,6 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 						        	"`usergroup`.`groupname` = `radgroupreply`.`groupname` AND "
 						        	"`radgroupreply`.`attribute` = '%s' "
 						        "ORDER BY `usergroup`.`priority` "
-/*						        "ORDER BY `radgroupreply`.`prio` " -- for older SQL schema */
 						        "LIMIT 1",
 						        user->vp_strvalue, data->limitvap)) {
 							case -1: /* no results */
@@ -571,9 +607,7 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 								return RLM_MODULE_FAIL;
 							default:
 								resetval = strtod(sqlsock->row[0], (char **) NULL);
-								bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-								         "using resetval defined in radgroupreply: %.0f",
-								         resetval);
+								bcnt_log(L_DBG, "using resetval defined in radgroupreply: %.0f", resetval);
 								bcnt_select_finish(data, sqlsock);
 								break;
 						}
@@ -583,8 +617,7 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 						return RLM_MODULE_FAIL;
 					default:
 						resetval = strtod(sqlsock->row[0], (char **) NULL);
-						bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-						         "using resetval defined in radreply: %.0f", resetval);
+						bcnt_log(L_DBG, "using resetval defined in radreply: %.0f", resetval);
 						bcnt_select_finish(data, sqlsock);
 						break;
 				}
@@ -601,11 +634,10 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 					bcnt_finish(data, sqlsock);
 
 				 	/* update next reset time (make sure it's greater than current time) */
-					while (rsttime < curtime) rsttime += data->period;
+					while (rsttime < curtime)
+						rsttime += data->period;
 
-					bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-					         "new reset time for user '%s': %u",
-					          user->vp_strvalue, rsttime);
+					bcnt_log(L_DBG, "new reset time for user '%s': %u", user->vp_strvalue, rsttime);
 
 					/* update resetvap in db */
 					if (!bcnt_query(__LINE__, data, sqlsock,
@@ -618,9 +650,8 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 					bcnt_finish(data, sqlsock);
 				}
 				else {
-					bcnt_log(__LINE__, data, L_INFO, "backcounter_authorize(): "
-					         "couldn't fetch resetval although it's reset time: "
-					         "user '%s'", user->vp_strvalue);
+					bcnt_log(L_INFO, "couldn't fetch resetval although it's reset time: user '%s'",
+						user->vp_strvalue);
 				}
 			}
 
@@ -635,7 +666,7 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 	        	"`Attribute` IN ('%s', '%s') LIMIT 1",
 	        user->vp_strvalue, data->leftvap, data->prepaidvap)) {
 		case -1: /* no results, but should not happen in this query  */
-			bcnt_log(__LINE__, data, L_ERR, "backcounter_authorize(): should not happen");
+			bcnt_log(L_ERR, "should not happen");
 			sql_release_socket(data->sqlinst, sqlsock);
 			return RLM_MODULE_NOOP;
 		case 0: /* db error */
@@ -646,8 +677,7 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 				counter = strtod(sqlsock->row[0], (char **) NULL);
 			}
 			else {
-				bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-				         "user '%s' has no '%s' nor '%s' attributes set in radreply table",
+				bcnt_log(L_DBG, "user '%s' has no '%s' nor '%s' attributes set in radreply table",
 				         user->vp_strvalue, data->leftvap, data->prepaidvap);
 
 				sql_release_socket(data->sqlinst, sqlsock);
@@ -656,6 +686,36 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 
 			bcnt_select_finish(data, sqlsock);
 			break;
+	}
+
+	/* Handle levels
+	 * 1. check if we are in some level, if not: skip this part
+	 * 2. multiply counter by the level factor
+	 * 3. set session time limit on the moment when the level ends
+	 */
+level_search:
+	level = bcnt_find_level(data->levels, curtime, &session_timeout);
+	if (level) {
+		/* dont enter new level if there is less than a minute remaining */
+		if (session_timeout < 60) {
+			curtime += 60;
+			goto level_search;
+		}
+
+		/* send last accounting data 15 seconds before level switch - otherwise values
+		 * could be multiplied by wrong factor */
+		session_timeout -= 15;
+
+		/* add session timeout */
+		vp = radius_paircreate(request, &request->reply->vps, PW_SESSION_TIMEOUT, PW_TYPE_INTEGER);
+		vp->vp_integer = session_timeout;
+
+		/* update the counter */
+		counter *= level->factor;
+
+		bcnt_log(L_DBG, "from %d each %d for %d use %g -> counter=%g, session-timeout=%d\n",
+			level->from, level->each, level->length, level->factor,
+			counter, session_timeout);
 	}
 
 	/* Below code handles four cases:
@@ -681,14 +741,12 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 				vp->vp_integer = (uint32_t) (counter + 0.0);
 		}
 		else {
-			bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-			         "warning: no guardvap attribute set");
+			bcnt_log(L_DBG, "warning: no guardvap attribute set");
 		}
 	}
 	else { /* over limit */
 		if (data->overvap_attr) {
-			bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-			         "user %s is over limit - adding '%s' attribute",
+			bcnt_log(L_DBG, "user %s is over limit - adding '%s' attribute",
 			         user->vp_strvalue, data->overvap);
 
 			/* set overvap_attr to 1 */
@@ -697,8 +755,7 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 			vp->vp_integer = 1;
 		}
 		else {
-			bcnt_log(__LINE__, data, L_DBG, "backcounter_authorize(): "
-			         "user %s is over limit - rejecting access",
+			bcnt_log(L_DBG, "user %s is over limit - rejecting access",
 			         user->vp_strvalue);
 
 			/* reject access */
@@ -722,14 +779,15 @@ static int backcounter_accounting(void *instance, REQUEST *request)
 	int i;
 	char *vapname;
 	double *targetcur;
+	uint32_t curtime;
+	struct bcnt_level *level;
 
 	rlm_backcounter_t *data = (rlm_backcounter_t *) instance;
 
 	/* react only to PW_STATUS_STOP packets */
 	vp = pairfind(request->packet->vps, PW_ACCT_STATUS_TYPE);
 	if (!vp) {
-		bcnt_log(__LINE__, data, L_ERR, "backcounter_accounting(): "
-		         "couldn't find type of accounting packet");
+		bcnt_log(L_ERR, "couldn't find type of accounting packet");
 		return RLM_MODULE_FAIL;
 	}
 	else if (vp->vp_integer != PW_STATUS_STOP) {
@@ -739,16 +797,14 @@ static int backcounter_accounting(void *instance, REQUEST *request)
 	/* get real username */
 	user = request->username;
 	if (user == NULL) {
-		bcnt_log(__LINE__, data, L_ERR, "backcounter_accounting(): "
-		         "couldn't find real user name");
+		bcnt_log(L_ERR, "couldn't find real user name");
 		return RLM_MODULE_FAIL;
 	}
 
 	/* connect to database */
 	sqlsock = sql_get_socket(data->sqlinst);
 	if (!sqlsock) {
-		bcnt_log(__LINE__, data, L_ERR,
-		         "backcounter_accounting(): couldn't connect to database");
+		bcnt_log(L_ERR, "couldn't connect to database");
 		return RLM_MODULE_FAIL;
 	}
 
@@ -760,8 +816,7 @@ static int backcounter_accounting(void *instance, REQUEST *request)
 		        "WHERE `UserName` = '%s' AND `Attribute` = '%s' LIMIT 1",
 		        user->vp_strvalue, vapname)) {
 			case -1: /* no results */
-				bcnt_log(__LINE__, data, L_DBG, "backcounter_accounting(): "
-				         "user %s has no %s attribute set in radreply table",
+				bcnt_log(L_DBG, "user %s has no %s attribute set in radreply table",
 				         user->vp_strvalue, vapname);
 				*targetcur = -0.1;
 				break;
@@ -778,15 +833,13 @@ static int backcounter_accounting(void *instance, REQUEST *request)
 	/* handle special cases */
 	if (curleft < 0 && curprepaid < 0) {
 		/* handle case when both counters are negative (ie. no limits) */
-		bcnt_log(__LINE__, data, L_DBG, "backcounter_accounting(): "
-		         "user %s: nothing to do", user->vp_strvalue);
+		bcnt_log(L_DBG, "user %s: nothing to do", user->vp_strvalue);
 		sql_release_socket(data->sqlinst, sqlsock);
 		return RLM_MODULE_NOOP;
 	}
 	else if (curleft <= 0 && curprepaid <= 0) {
 		/* handle case when both counters are nonpositive (ie. limit reached) */
-		bcnt_log(__LINE__, data, L_INFO, "backcounter_accounting(): "
-		         "user %s has already reached his limit!", user->vp_strvalue);
+		bcnt_log(L_INFO, "user %s has already reached his limit!", user->vp_strvalue);
 		sql_release_socket(data->sqlinst, sqlsock);
 		return RLM_MODULE_NOOP;
 	}
@@ -795,14 +848,25 @@ static int backcounter_accounting(void *instance, REQUEST *request)
 	for (i = 0; data->count_attrs[i]; i++) {
 		vp = pairfind(request->packet->vps, data->count_attrs[i]);
 		if (!vp) {
-			bcnt_log(__LINE__, data, L_DBG, "backcounter_accounting(): "
-			         "couldn't find attribute #%u to subtract from counters",
+			bcnt_log(L_DBG, "couldn't find attribute #%u to subtract from counters",
 			         data->count_attrs[i]);
 		}
 		else {
 			/* FIXME: the attribute may not be of "integer" type (check vp->type) */
 			sum += vp->vp_integer;
 		}
+	}
+
+	/* handle levels */
+	/* TODO: use session start time instead of curtime? */
+	curtime = (uint32_t) time(NULL);
+	level = bcnt_find_level(data->levels, curtime, NULL);
+
+	if (level) {
+		sum *= level->factor;
+
+		bcnt_log(L_DBG, "from %d each %d for %d use %g -> sum=%g\n",
+			level->from, level->each, level->length, level->factor, sum);
 	}
 
 	/* select first counter to subtract from */
@@ -825,8 +889,7 @@ static int backcounter_accounting(void *instance, REQUEST *request)
 		}
 
 		if (*targetcur < 0) {
-			bcnt_log(__LINE__, data, L_INFO, "backcounter_accounting(): "
-			         "user %s has sent %.0f more bytes than he should",
+			bcnt_log(L_INFO, "user %s has sent %.0f more bytes than he should",
 			         user->vp_strvalue, -(*targetcur));
 			*targetcur = 0.0;      /* can't be negative */
 		}

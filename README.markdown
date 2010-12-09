@@ -142,6 +142,35 @@ required):
         ASN-Kbps-Down := 64,
         ASN-Kbps-Up := 64
 
+Levels
+======
+
+Version 0.2 brings a feature of counter rates dependent on time - for example it
+can count two times slower during weekends. This functionality is configured
+using *levels* keyword.
+
+Example: Lets say that today just after midnight the UNIX timestamp was
+1279670400. Its a time reference point. You want to make a special level which
+repeats each week = 7 days = 168 hours = 604800 seconds. You want to count half
+data from midnight till 6.00 AM = 6 hours = 21600 seconds. So in radiusd.conf
+you'll write:
+
+    levels = "from 1279670400 each 604800 for 21600 use 0.5"
+
+If you want to implement your "half data is counted at evenings and weekends",
+you write:
+
+    levels = "from 1279753200 each 86400 for 21600 use 0.5,   \
+              from 1279947600 each 604800 for 172800 use 0.5"
+
+If you have at least one level defined, the server will automatically set
+*Session-Timeout* VAP to the closest level change event minus 15 seconds. The
+server will also ensure that the *Session-Timeout* is not set to a value smaller
+than 60 seconds.
+
+Levels are used in the order they appear in config file. First matching level
+wins.
+
 Current limitations (maybe a TODO list)
 =======================================
 
