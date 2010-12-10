@@ -141,6 +141,10 @@ Add new attributes in the dictionary file:
     # strange, but it's not in official FreeRADIUS dictionary
     ATTRIBUTE Session-Octets-Limit       227 integer
 
+    # Mikrotik
+    ATTRIBUTE       Mikrotik-Total-Limit                    17      integer
+    ATTRIBUTE       Mikrotik-Total-Limit-Gigawords          18      integer
+
 If you wish to limit bandwidth usage on eg. a Lintrack router, add this to your
 users file (some modifications depending on local configuration may be
 required):
@@ -184,7 +188,5 @@ Current limitations (maybe a TODO list)
 
 * probably works only with MySQL
 * a bit too "hardcoded"
-    * queries and tables names not configurable
-    * low-level access to database 
-* handles only at most 32-bit counters for single sessions (but using counters
-  of "any" size in database is possible)
+    * queries and table names not configurable
+    * low-level access to database
