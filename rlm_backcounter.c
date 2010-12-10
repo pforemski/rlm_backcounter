@@ -199,6 +199,7 @@ static struct bcnt_level *bcnt_find_level(struct bcnt_level *root, uint32_t curt
 	uint32_t session_timeout;
 	uint32_t time_in_level;
 
+level_search:
 	session_timeout = UINT32_MAX;
 
 	for (level = root; level; level = level->next) {
@@ -224,6 +225,12 @@ static struct bcnt_level *bcnt_find_level(struct bcnt_level *root, uint32_t curt
 		/* set session timeout so it finishes on level end */
 		session_timeout = level->length - time_in_level;
 		break;
+	}
+
+	/* dont select a level if there is less than a minute remaining */
+	if (session_timeout < 60) {
+		curtime += 60;
+		goto level_search;
 	}
 
 	if (time_left)
@@ -693,25 +700,14 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 	 * 2. multiply counter by the level factor
 	 * 3. set session time limit on the moment when the level ends
 	 */
-level_search:
 	level = bcnt_find_level(data->levels, curtime, &session_timeout);
 	if (level) {
-		/* dont enter new level if there is less than a minute remaining */
-		if (session_timeout < 60) {
-			curtime += 60;
-			goto level_search;
-		}
-
-		/* send last accounting data 15 seconds before level switch - otherwise values
-		 * could be multiplied by wrong factor */
-		session_timeout -= 15;
+		/* update the counter */
+		counter *= level->factor;
 
 		/* add session timeout */
 		vp = radius_paircreate(request, &request->reply->vps, PW_SESSION_TIMEOUT, PW_TYPE_INTEGER);
 		vp->vp_integer = session_timeout;
-
-		/* update the counter */
-		counter *= level->factor;
 
 		bcnt_log(L_DBG, "from %d each %d for %d use %g -> counter=%g, session-timeout=%d\n",
 			level->from, level->each, level->length, level->factor,
@@ -857,16 +853,30 @@ static int backcounter_accounting(void *instance, REQUEST *request)
 		}
 	}
 
-	/* handle levels */
-	/* TODO: use session start time instead of curtime? */
+	/*
+	 * handle levels
+	 */
 	curtime = (uint32_t) time(NULL);
-	level = bcnt_find_level(data->levels, curtime, NULL);
 
+	/* subtract Acct-Session-Time */
+	vp = pairfind(request->packet->vps, PW_ACCT_SESSION_TIME);
+	if (vp) {
+		curtime -= vp->vp_integer;
+	}
+
+	/* subtract Acct-Delay-Time */
+	vp = pairfind(request->packet->vps, PW_ACCT_DELAY_TIME);
+	if (vp) {
+		curtime -= vp->vp_integer;
+	}
+
+	/* get the level that was active at connection start */
+	level = bcnt_find_level(data->levels, curtime, NULL);
 	if (level) {
 		sum *= level->factor;
 
-		bcnt_log(L_DBG, "from %d each %d for %d use %g -> sum=%g\n",
-			level->from, level->each, level->length, level->factor, sum);
+		bcnt_log(L_DBG, "time=%d -> from %d each %d for %d use %g -> sum=%g\n",
+			curtime, level->from, level->each, level->length, level->factor, sum);
 	}
 
 	/* select first counter to subtract from */
