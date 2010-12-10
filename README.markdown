@@ -51,6 +51,18 @@ Only _Accounting-Stop_ packets are considered.
      * let the administrator choose whether to decrement the prepaid or the
        "monthly" counter first
 
+Installation
+============
+
+    1. Download and unpack FreeRADIUS - e.g. to *freeradius/*
+    2. Put source code of this module in *freeradius/src/modules/rlm_backcounter/*
+    3. Add "rlm_backcounter" at the top of *freeradius/src/modules/stable* file
+    4. Change directory into *freeradius/src/modules/rlm_backcounter/*
+    5. Run *autoconf* (you may need to install it on your system)
+    6. Proceed with the standard FreeRADIUS installation procedure.
+    7. Verify if you have a file named *rlm_backcounter.so* in your libraries
+       (usually /usr/lib or /usr/local/lib).
+
 Configuration
 =============
 
@@ -109,7 +121,7 @@ Then, instantiate it after rlm_sql:
         # (...)
     }
 
-Put it in the authorize section:
+Put it in the authorize section after rlm_sql:
 
     authorize {
         # (...)
@@ -131,19 +143,20 @@ Add new attributes in the dictionary file:
 
     # (...)
 
-    # string, because integer's 2^32 may not be sufficient
+    # custom, local attributes that will not get sent over the network
     ATTRIBUTE Monthly-Transfer-Limit    3100 string
     ATTRIBUTE Monthly-Transfer-Reset    3101 integer
     ATTRIBUTE Monthly-Transfer-Exceeded 3102 integer
     ATTRIBUTE Monthly-Transfer-Left     3103 string
     ATTRIBUTE Monthly-Transfer-Prepaid  3104 string
 
-    # strange, but it's not in official FreeRADIUS dictionary
+    # a session traffic limit for pppd
+    # for some reason it's not in the official FreeRADIUS dictionary
     ATTRIBUTE Session-Octets-Limit       227 integer
 
-    # Mikrotik
-    ATTRIBUTE       Mikrotik-Total-Limit                    17      integer
-    ATTRIBUTE       Mikrotik-Total-Limit-Gigawords          18      integer
+    # Mikrotik session traffic limits
+    ATTRIBUTE Mikrotik-Total-Limit                    17      integer
+    ATTRIBUTE Mikrotik-Total-Limit-Gigawords          18      integer
 
 If you wish to limit bandwidth usage on eg. a Lintrack router, add this to your
 users file (some modifications depending on local configuration may be
