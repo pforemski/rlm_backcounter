@@ -70,6 +70,11 @@ In radiusd.conf, create module configuration:
 
             # VAP in which to send the amount which is left
             guardvap = "Session-Octets-Limit"
+            #guardvap = "Mikrotik-Total-Limit"
+
+            # VAP to use if the value in guardvap is greater than 2^32
+            # it will hold the bits 32-63 of the number
+            #giga_guardvap = "Mikrotik-Total-Limit-Gigawords"
 
             # reset counters each 30 days
             period = 2592000

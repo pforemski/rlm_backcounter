@@ -65,17 +65,22 @@ typedef struct rlm_backcounter_t {
 	char *sqlinst_name;         /* rlm_sql instance to use */
 	int period;                 /* leftvap counter reset period, in seconds */
 	int prepaidfirst;           /* if true prepaidvap is be decreased first */
+
 	char *count_names;          /* attributes to count values of, sep with "," */
 	int *count_attrs;           /* as above, int values */
+
 	char *overvap;              /* add this VAP to *request* if user has exceeded
 	                               his limits; if null, then reject access */
 	int overvap_attr;           /* int value of overvap */
+
 	char *guardvap;             /* attribute to set to current counters sum
 	                               ie. it should make the NAS close user session
 	                               when necessary, not to exceed the limits */
 	int guardvap_attr;          /* int value of guardvap */
+	char *giga_guardvap;        /* same as guardvap but counts 4 gigas (2^32) */
+	int giga_guardvap_attr;     /* int value of giga_guardvap */
 
-	/* VAP names (in db) */
+	/* from database - VAP names */
 	char *leftvap;              /* current user counter state (the main counter) */
 	char *limitvap;             /* the amount to add to db_left on counter reset */
 	char *resetvap;             /* next counter reset time */
@@ -89,28 +94,30 @@ typedef struct rlm_backcounter_t {
 /* char *name, int type,
  * size_t offset, void *data, char *dflt */
 static CONF_PARSER module_config[] = {
-	{ "sqlinst_name", PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, sqlinst_name), NULL, "sql" },
-	{ "period",       PW_TYPE_INTEGER,
-	  offsetof(rlm_backcounter_t, period),       NULL, "2592000" },  /* default: 30 days */
-	{ "prepaidfirst", PW_TYPE_BOOLEAN,
-	  offsetof(rlm_backcounter_t, prepaidfirst), NULL, "yes" },
-	{ "count_names",  PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, count_names),  NULL, "Acct-Input-Octets, Acct-Output-Octets" },
-	{ "overvap",      PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, overvap),      NULL, "Counter-Exceeded" },
-	{ "guardvap",     PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, guardvap),     NULL, "Session-Octets-Limit" },
-	{ "leftvap",      PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, leftvap),      NULL, "Counter-Left" },
-	{ "limitvap",     PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, limitvap),     NULL, "Counter-Limit" },
-	{ "resetvap",     PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, resetvap),     NULL, "Counter-Reset" },
-	{ "prepaidvap",   PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, prepaidvap),   NULL, "Counter-Prepaid" },
-	{ "levels",       PW_TYPE_STRING_PTR,
-	  offsetof(rlm_backcounter_t, levels_str),   NULL, "" },
+	{ "sqlinst_name",  PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, sqlinst_name),  NULL, "sql" },
+	{ "period",        PW_TYPE_INTEGER,
+	  offsetof(rlm_backcounter_t, period),        NULL, "2592000" },  /* default: 30 days */
+	{ "prepaidfirst",  PW_TYPE_BOOLEAN,
+	  offsetof(rlm_backcounter_t, prepaidfirst),  NULL, "yes" },
+	{ "count_names",   PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, count_names),   NULL, "Acct-Input-Octets, Acct-Output-Octets" },
+	{ "overvap",       PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, overvap),       NULL, "Counter-Exceeded" },
+	{ "guardvap",      PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, guardvap),      NULL, "Session-Octets-Limit" },
+	{ "giga_guardvap", PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, giga_guardvap), NULL, "" },
+	{ "leftvap",       PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, leftvap),       NULL, "Counter-Left" },
+	{ "limitvap",      PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, limitvap),      NULL, "Counter-Limit" },
+	{ "resetvap",      PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, resetvap),      NULL, "Counter-Reset" },
+	{ "prepaidvap",    PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, prepaidvap),    NULL, "Counter-Prepaid" },
+	{ "levels",        PW_TYPE_STRING_PTR,
+	  offsetof(rlm_backcounter_t, levels_str),    NULL, "" },
 	{ NULL, -1, 0, NULL, NULL } /* end */
 };
 
@@ -350,15 +357,16 @@ static int backcounter_detach(void *instance)
 	data = (rlm_backcounter_t *) instance;
 
 	/* (*data) is zeroed on instantiation */
-	if (data->sqlinst_name) free(data->sqlinst_name);
-	if (data->count_names)  free(data->count_names);
-	if (data->count_attrs)  free(data->count_attrs);
-	if (data->leftvap)      free(data->leftvap);
-	if (data->limitvap)     free(data->limitvap);
-	if (data->resetvap)     free(data->resetvap);
-	if (data->prepaidvap)   free(data->prepaidvap);
-	if (data->overvap)      free(data->overvap);
-	if (data->guardvap)     free(data->guardvap);
+	if (data->sqlinst_name)  free(data->sqlinst_name);
+	if (data->count_names)   free(data->count_names);
+	if (data->count_attrs)   free(data->count_attrs);
+	if (data->leftvap)       free(data->leftvap);
+	if (data->limitvap)      free(data->limitvap);
+	if (data->resetvap)      free(data->resetvap);
+	if (data->prepaidvap)    free(data->prepaidvap);
+	if (data->overvap)       free(data->overvap);
+	if (data->guardvap)      free(data->guardvap);
+	if (data->giga_guardvap) free(data->giga_guardvap);
 
 	/* free levels */
 	level = data->levels;
@@ -477,6 +485,19 @@ static int backcounter_instantiate(CONF_SECTION *conf, void **instance)
 	}
 	else {
 		data->guardvap_attr = 0;
+	}
+
+	if (data->giga_guardvap && data->giga_guardvap[0]) {
+		dattr = dict_attrbyname(data->giga_guardvap);
+		if (dattr == NULL) {
+			bcnt_log(L_ERR, "giga_guardvap: can't find such attribute: %s", data->giga_guardvap);
+			backcounter_detach(*instance);
+			return -1;
+		}
+		data->giga_guardvap_attr = dattr->attr;
+	}
+	else {
+		data->giga_guardvap_attr = 0;
 	}
 
 	/*
@@ -725,16 +746,24 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 	if (counter > 0) { /* under limit */
 		if (data->guardvap_attr) {
 			/* set guardvap_attr to counter */
-			/* FIXME: assuming PW_TYPE_INTEGER type of guardvap_attr */
 			vp = radius_paircreate(request, &request->reply->vps,
 			                       data->guardvap_attr, PW_TYPE_INTEGER);
 
-			/* FIXME: double -> int32 */
-			/* FIXME: workaround stupid bug in pppd's Session-Octets-Limit */
-			if (counter > INT32_MAX)
-				vp->vp_integer = INT32_MAX;
-			else
-				vp->vp_integer = (uint32_t) (counter + 0.0);
+			if (counter > UINT32_MAX) {
+				if (data->giga_guardvap_attr) {
+					vp->vp_integer = (uint32_t) counter;
+
+					/* set higher bits 32..63 */
+					vp = radius_paircreate(request, &request->reply->vps,
+					                       data->giga_guardvap_attr, PW_TYPE_INTEGER);
+					vp->vp_integer = (uint32_t) (counter / UINT32_MAX);
+				} else {
+					/* set the maximum possible value */
+					vp->vp_integer = UINT32_MAX;
+				}
+			} else {
+				vp->vp_integer = (uint32_t) counter;
+			}
 		}
 		else {
 			bcnt_log(L_DBG, "warning: no guardvap attribute set");
