@@ -82,6 +82,9 @@ In radiusd.conf, create module configuration:
             # monthly transfer limit, in bytes
             limitvap = "Monthly-Transfer-Limit"
 
+            # if enabled, the counters will not be resetted
+            #noreset = "yes"
+
             # time of next reset for this particular user
             resetvap = "Monthly-Transfer-Reset"
 

@@ -65,6 +65,7 @@ typedef struct rlm_backcounter_t {
 	char *sqlinst_name;         /* rlm_sql instance to use */
 	int period;                 /* leftvap counter reset period, in seconds */
 	int prepaidfirst;           /* if true prepaidvap is be decreased first */
+	int noreset;                /* if true don't do any counter resets */
 
 	char *count_names;          /* attributes to count values of, sep with "," */
 	int *count_attrs;           /* as above, int values */
@@ -100,6 +101,8 @@ static CONF_PARSER module_config[] = {
 	  offsetof(rlm_backcounter_t, period),        NULL, "2592000" },  /* default: 30 days */
 	{ "prepaidfirst",  PW_TYPE_BOOLEAN,
 	  offsetof(rlm_backcounter_t, prepaidfirst),  NULL, "yes" },
+	{ "noreset",       PW_TYPE_BOOLEAN,
+	  offsetof(rlm_backcounter_t, noreset),       NULL, "no" },
 	{ "count_names",   PW_TYPE_STRING_PTR,
 	  offsetof(rlm_backcounter_t, count_names),   NULL, "Acct-Input-Octets, Acct-Output-Octets" },
 	{ "overvap",       PW_TYPE_STRING_PTR,
@@ -345,6 +348,7 @@ static int bcnt_select_finish(rlm_backcounter_t *data, SQLSOCK *sqlsock)
 	         bcnt_finish(data, sqlsock));
 }
 
+
 /** Cleanup stuff */
 static int backcounter_detach(void *instance)
 {
@@ -589,6 +593,7 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 	}
 
 	/* fetch *resetvap */
+	if (!data->noreset)
 	switch (bcnt_select(__LINE__, data, sqlsock,
 	        "SELECT `Value` FROM `radreply` "
 	        "WHERE `UserName` = '%s' AND `Attribute` = '%s' LIMIT 1",
