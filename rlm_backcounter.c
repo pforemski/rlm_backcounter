@@ -729,7 +729,7 @@ static int backcounter_authorize(void *instance, REQUEST *request)
 	level = bcnt_find_level(data->levels, curtime, &session_timeout);
 	if (level) {
 		/* update the counter */
-		counter *= level->factor;
+		counter /= level->factor;
 
 		/* add session timeout */
 		vp = radius_paircreate(request, &request->reply->vps, PW_SESSION_TIMEOUT, PW_TYPE_INTEGER);
