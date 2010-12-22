@@ -54,14 +54,14 @@ Only _Accounting-Stop_ packets are considered.
 Installation
 ============
 
-    1. Download and unpack FreeRADIUS - e.g. to *freeradius/*
-    2. Put source code of this module in *freeradius/src/modules/rlm_backcounter/*
-    3. Add "rlm_backcounter" at the top of *freeradius/src/modules/stable* file
-    4. Change directory into *freeradius/src/modules/rlm_backcounter/*
-    5. Run *autoconf* (you may need to install it on your system)
-    6. Proceed with the standard FreeRADIUS installation procedure.
-    7. Verify if you have a file named *rlm_backcounter.so* in your libraries
-       (usually /usr/lib or /usr/local/lib).
+1. Download and unpack FreeRADIUS - e.g. to *freeradius/*
+2. Put source code of this module in *freeradius/src/modules/rlm_backcounter/*
+3. Add "rlm_backcounter" at the top of *freeradius/src/modules/stable* file
+4. Change directory into *freeradius/src/modules/rlm_backcounter/*
+5. Run *autoconf* (you may need to install it on your system)
+6. Proceed with the standard FreeRADIUS installation procedure.
+7. Verify if you have a file named *rlm_backcounter.so* in your libraries
+   (usually /usr/lib or /usr/local/lib).
 
 Configuration
 =============
